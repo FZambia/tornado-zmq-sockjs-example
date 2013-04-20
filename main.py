@@ -1,9 +1,9 @@
 # -*- coding: utf-8 -*-
 
-
 import tornado.ioloop
 import tornado.web
 import sockjs.tornado
+import logging
 import zmq
 from zmq.eventloop import ioloop
 from zmq.eventloop.zmqstream import ZMQStream
@@ -12,12 +12,20 @@ from zmq.eventloop.zmqstream import ZMQStream
 # http://zeromq.github.com/pyzmq/eventloop.html
 ioloop.install()
 
-# Socket for communication between sockets
-IPC_SOCKET = 'ipc:///tmp/zmq.ipc.sock'
+
+logging.getLogger().setLevel(logging.DEBUG)
+
+
+TORNADO_PORT = 8001
+ZMQ_PORT = 5556
+
+context = zmq.Context()
+publisher = context.socket(zmq.PUB)
+publisher.bind("tcp://*:%s" % str(ZMQ_PORT))
+publish_stream = ZMQStream(publisher)
 
 
 class IndexHandler(tornado.web.RequestHandler):
-    """Template renderer"""
 
     def get(self, *args, **kwargs):
         self.render('index.html')
@@ -27,51 +35,55 @@ class SocketConnection(sockjs.tornado.SockJSConnection):
 
     clients = set()
 
-    # Instantiate context only once
-    # TODO: it will be a good idea to create in somewhere in the application init method,
-    # but connection object does'nt have an access to it. Maybe we should put it into a SockRouter?
-    context = zmq.Context()
-
     def on_open(self, request):
         self.clients.add(self)
 
-        publisher = self.context.socket(zmq.PUB)
-        publisher.bind(IPC_SOCKET)
-
-        self.publish_stream = ZMQStream(publisher)
-
-        subscriber = self.context.socket(zmq.SUB)
-        subscriber.connect(IPC_SOCKET)
+        subscriber = context.socket(zmq.SUB)
+        subscriber.connect("tcp://localhost:%s" % str(ZMQ_PORT))
         subscriber.setsockopt(zmq.SUBSCRIBE, '')
-
         self.subscribe_stream = ZMQStream(subscriber)
-        self.subscribe_stream.on_recv(self.on_receive_message)
+        self.subscribe_stream.on_recv(self.on_message_published)
 
     def on_message(self, message):
-        self.publish_stream.send_unicode(message)
+        logging.info(
+            'message received, publish it to %d clients' % len(self.clients)
+        )
+        publish_stream.send_unicode(message)
 
-    def on_receive_message(self, message):
+    def on_message_published(self, message):
+        logging.info('client received new published message')
         self.send(message)
 
     def on_close(self):
         self.clients.remove(self)
-
-        # Properly close ZMQ sockets
-        self.publish_stream.close()
+        # Properly close ZMQ socket
         self.subscribe_stream.close()
 
-if __name__ == '__main__':
-    import logging
-    logging.getLogger().setLevel(logging.DEBUG)
+
+def run():
 
     SocketRouter = sockjs.tornado.SockJSRouter(SocketConnection, '/socket')
 
     app = tornado.web.Application(
         [(r'/', IndexHandler), ] + SocketRouter.urls,
         debug=True,
-        autoreload=True,
     )
 
-    app.listen(8080)
+    app.listen(TORNADO_PORT)
+
+    logging.info("app started, visit http://localhost:%s" % TORNADO_PORT)
 
     tornado.ioloop.IOLoop.instance().start()
+
+
+def main():
+    try:
+        run()
+    except KeyboardInterrupt:
+        pass
+    finally:
+        publish_stream.close()
+
+
+if __name__ == '__main__':
+    main()

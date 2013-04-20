@@ -39,6 +39,7 @@
                     };
 
                     connection.onmessage = function(event) {
+                        console.log(event);
                         message(event.data);
                     };
                 }
